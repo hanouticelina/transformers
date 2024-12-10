@@ -34,7 +34,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Type, TypeVa
 from zipfile import is_zipfile
 
 import torch
-from huggingface_hub import split_torch_state_dict_into_shards
+from huggingface_hub import load_state_dict_from_file, split_torch_state_dict_into_shards
 from packaging import version
 from torch import Tensor, nn
 from torch.nn import CrossEntropyLoss, Identity
@@ -139,6 +139,7 @@ logger = logging.get_logger(__name__)
 
 
 _init_weights = True
+
 _is_quantized = False
 _is_ds_init_called = False
 
@@ -428,6 +429,10 @@ def load_sharded_checkpoint(model, folder, strict=True, prefer_safe=True):
             - `missing_keys` is a list of str containing the missing keys
             - `unexpected_keys` is a list of str containing the unexpected keys
     """
+    logger.warning(
+        "Note that `load_sharded_checkpoint` is deprecated and will be removed in v4.50. We recommend you using "
+        "`load_torch_model` from huggingface_hub library"
+    )
     # Load the index
     index_file = os.path.join(folder, WEIGHTS_INDEX_NAME)
     safe_index_file = os.path.join(folder, SAFE_WEIGHTS_INDEX_NAME)
@@ -499,65 +504,28 @@ def load_state_dict(
     """
     Reads a PyTorch checkpoint file, returning properly formatted errors if they arise.
     """
-    if checkpoint_file.endswith(".safetensors") and is_safetensors_available():
-        # Check format of the archive
-        with safe_open(checkpoint_file, framework="pt") as f:
-            metadata = f.metadata()
-        if metadata.get("format") not in ["pt", "tf", "flax", "mlx"]:
-            raise OSError(
-                f"The safetensors archive passed at {checkpoint_file} does not contain the valid metadata. Make sure "
-                "you save your model with the `save_pretrained` method."
-            )
-        return safe_load_file(checkpoint_file)
-    try:
-        if map_location is None:
-            if (
-                (
-                    is_deepspeed_zero3_enabled()
-                    and torch.distributed.is_initialized()
-                    and torch.distributed.get_rank() > 0
-                )
-                or (is_fsdp_enabled() and not is_local_dist_rank_0())
-            ) and not is_quantized:
-                map_location = "meta"
-            else:
-                map_location = "cpu"
-        extra_args = {}
-        # mmap can only be used with files serialized with zipfile-based format.
+    # ? should we move this snippet (map_location, use_mmap) to huggingface_hub?
+    if map_location is None:
         if (
-            isinstance(checkpoint_file, str)
-            and map_location != "meta"
-            and version.parse(torch.__version__) >= version.parse("2.1.0")
-            and is_zipfile(checkpoint_file)
-        ):
-            extra_args = {"mmap": True}
-        weights_only_kwarg = {"weights_only": weights_only} if is_torch_greater_or_equal_than_1_13 else {}
-        return torch.load(
-            checkpoint_file,
-            map_location=map_location,
-            **weights_only_kwarg,
-            **extra_args,
-        )
-    except Exception as e:
-        try:
-            with open(checkpoint_file) as f:
-                if f.read(7) == "version":
-                    raise OSError(
-                        "You seem to have cloned a repository without having git-lfs installed. Please install "
-                        "git-lfs and run `git lfs install` followed by `git lfs pull` in the folder "
-                        "you cloned."
-                    )
-                else:
-                    raise ValueError(
-                        f"Unable to locate the file {checkpoint_file} which is necessary to load this pretrained "
-                        "model. Make sure you have saved the model properly."
-                    ) from e
-        except (UnicodeDecodeError, ValueError):
-            raise OSError(
-                f"Unable to load weights from pytorch checkpoint file for '{checkpoint_file}' "
-                f"at '{checkpoint_file}'. "
-                "If you tried to load a PyTorch model from a TF 2.0 checkpoint, please set from_tf=True."
-            )
+            (is_deepspeed_zero3_enabled() and torch.distributed.is_initialized() and torch.distributed.get_rank() > 0)
+            or (is_fsdp_enabled() and not is_local_dist_rank_0())
+        ) and not is_quantized:
+            map_location = "meta"
+        else:
+            map_location = "cpu"
+
+    use_mmap = (
+        isinstance(checkpoint_file, str)
+        and map_location != "meta"
+        and version.parse(torch.__version__) >= version.parse("2.1.0")
+        and is_zipfile(checkpoint_file)
+    )
+    return load_state_dict_from_file(
+        checkpoint_file,
+        map_location=map_location,
+        weights_only=weights_only,
+        mmap=use_mmap,
+    )
 
 
 def set_initialized_submodules(model, state_dict_keys):
@@ -4034,7 +4002,6 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
             if not is_sharded and state_dict is None:
                 # Time to load the checkpoint
                 state_dict = load_state_dict(resolved_archive_file, weights_only=weights_only)
-
             # set dtype to instantiate the model under:
             # 1. If torch_dtype is not None, we use that dtype
             # 2. If torch_dtype is "auto", we auto-detect dtype from the loaded state_dict, by checking its first
