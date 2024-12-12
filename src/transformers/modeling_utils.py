@@ -430,7 +430,7 @@ def load_sharded_checkpoint(model, folder, strict=True, prefer_safe=True):
             - `unexpected_keys` is a list of str containing the unexpected keys
     """
     logger.warning(
-        "Note that `load_sharded_checkpoint` is deprecated and will be removed in v4.50. We recommend you using "
+        "Note that `load_sharded_checkpoint` is deprecated and will be removed in v5.0. We recommend you using "
         "`load_torch_model` from huggingface_hub library"
     )
     # Load the index
